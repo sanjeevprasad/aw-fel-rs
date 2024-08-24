@@ -1,42 +1,21 @@
+#![warn(clippy::all)]
 //! Allwinner FEL library.
+use std::{fmt, io, ops::Deref, time::Duration};
 
-#![forbid(anonymous_parameters)]
-#![warn(clippy::pedantic)]
-#![deny(
-    clippy::all,
-    variant_size_differences,
-    unused_results,
-    unused_qualifications,
-    unused_import_braces,
-    unsafe_code,
-    trivial_numeric_casts,
-    trivial_casts,
-    missing_docs,
-    unused_extern_crates,
-    missing_debug_implementations,
-    missing_copy_implementations
-)]
-#![allow(clippy::similar_names, clippy::cast_possible_truncation)]
-
-use std::{fmt, io, ops::Deref, time::Duration, u32};
-
-use libusb::DeviceHandle;
+use anyhow::{bail, Context as AnyhowContext, Error};
+use rusb::{Context, DeviceHandle, UsbContext};
 
 use byteorder::{ByteOrder, LittleEndian};
-use failure::{bail, Error, Fail, ResultExt};
 
 mod soc;
 #[cfg(feature = "uboot")]
 mod uboot;
 
 /// FEL errors.
-#[derive(Debug, Fail, PartialEq)]
+#[derive(Debug, thiserror::Error, PartialEq)]
 pub enum FelError {
     /// USB response error.
-    #[fail(
-        display = "invalid response: expected '{}', found: {}",
-        expected, found
-    )]
+    #[error("invalid response: expected '{expected}', found: {found}")]
     Response {
         /// Expected string.
         expected: &'static str,
@@ -44,13 +23,13 @@ pub enum FelError {
         found: String,
     },
     /// Unsupported device ID.
-    #[fail(display = "unsupported device ID: {:#010x}", id)]
+    #[error("unsupported device ID: {:#010x}", id)]
     UnsupportedDevId {
         /// Unsupported device ID.
         id: u32,
     },
     /// SPL header error.
-    #[fail(display = "SPL header error: {}", msg)]
+    #[error("SPL header error: {}", msg)]
     SPLHeader {
         /// SPL header error message.
         msg: &'static str,
@@ -101,11 +80,11 @@ const LCODE_ARM_RW_WORDS: usize = 12;
 /// Word count of the `rmr_request` scratch code.
 const LCODE_ARM_RMR_WORDS: usize = 15;
 /// Code size in bytes.
-const LCODE_ARM_RW_SIZE: usize = (LCODE_ARM_RW_WORDS << 2);
+const LCODE_ARM_RW_SIZE: usize = LCODE_ARM_RW_WORDS << 2;
 /// Maximum total words in buffer.
 const LCODE_MAX_TOTAL: usize = 0x100;
 /// Data words for read/write requests.
-const LCODE_MAX_RW_WORDS: usize = (LCODE_MAX_TOTAL - LCODE_ARM_RW_WORDS);
+const LCODE_MAX_RW_WORDS: usize = LCODE_MAX_TOTAL - LCODE_ARM_RW_WORDS;
 
 /// *DRAM* base address.
 const DRAM_BASE: u32 = 0x4000_0000;
@@ -133,13 +112,13 @@ fn u32_as_u8_mut(src: &mut [u32]) -> &mut [u8] {
 }
 
 /// FEL device handle.
-pub struct FelHandle<'h> {
-    usb_handle: UsbHandle<'h>,
+pub struct FelHandle {
+    usb_handle: UsbHandle,
     soc_version: soc::Version,
     soc_info: soc::Info,
 }
 
-impl<'h> fmt::Debug for FelHandle<'h> {
+impl fmt::Debug for FelHandle {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("FelHandle")
             .field("usb_handle", &self.usb_handle)
@@ -149,7 +128,7 @@ impl<'h> fmt::Debug for FelHandle<'h> {
     }
 }
 
-impl<'h> FelHandle<'h> {
+impl FelHandle {
     /// Gets the SoC information from the FEL device.
     ///
     /// Note: This is a no-op. The *SoC* information is acquired during initialization.
@@ -521,13 +500,13 @@ impl<'h> FelHandle<'h> {
     /// Read words chunk from the FEL device memory.
     pub fn read_words(&self, offset: u32, words: &mut [u32]) -> Result<(), Error> {
         assert!(
-            u32::max_value() - (words.len() * 4) as u32 > offset,
+            u32::MAX - (words.len() * 4) as u32 > offset,
             "cannot read above {:#010x} - offset: {:#010x}, buffer length: {:#010x} words, words \
              above offset: {:#010x}",
-            u32::max_value(),
+            u32::MAX,
             offset,
             words.len(),
-            (u32::max_value() - offset) / 4
+            (u32::MAX - offset) / 4
         );
         for (i, chunk) in words.chunks_mut(LCODE_MAX_RW_WORDS).enumerate() {
             self.read_words_chunk(offset + (i * LCODE_ARM_RW_WORDS) as u32, chunk)
@@ -539,13 +518,13 @@ impl<'h> FelHandle<'h> {
     /// Write words chunk to the FEL device memory.
     pub fn write_words(&self, offset: u32, words: &[u32]) -> Result<(), Error> {
         assert!(
-            u32::max_value() - (words.len() * 4) as u32 > offset,
+            u32::MAX - (words.len() * 4) as u32 > offset,
             "cannot write above {:#010x} - offset: {:#010x}, buffer length: {:#010x} words, words \
              above offset: {:#010x}",
-            u32::max_value(),
+            u32::MAX,
             offset,
             words.len(),
-            (u32::max_value() - offset) / 4
+            (u32::MAX - offset) / 4
         );
         for (i, chunk) in words.chunks(LCODE_MAX_RW_WORDS).enumerate() {
             self.write_words_chunk(offset + (i * LCODE_ARM_RW_WORDS) as u32, chunk)
@@ -716,23 +695,23 @@ impl<'h> FelHandle<'h> {
     }
 }
 
-impl<'h> Deref for FelHandle<'h> {
-    type Target = UsbHandle<'h>;
+impl Deref for FelHandle {
+    type Target = UsbHandle;
 
-    fn deref(&self) -> &UsbHandle<'h> {
+    fn deref(&self) -> &UsbHandle {
         &self.usb_handle
     }
 }
 
 /// USB device handle.
-pub struct UsbHandle<'h> {
-    device_handle: DeviceHandle<'h>,
+pub struct UsbHandle {
+    device_handle: DeviceHandle<rusb::Context>,
     endpoint_in: u8,
     endpoint_out: u8,
     iface_detached: bool,
 }
 
-impl<'h> fmt::Debug for UsbHandle<'h> {
+impl fmt::Debug for UsbHandle {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("UsbHandle")
             .field("endpoint_in", &self.endpoint_in)
@@ -742,21 +721,21 @@ impl<'h> fmt::Debug for UsbHandle<'h> {
     }
 }
 
-impl<'h> UsbHandle<'h> {
+impl UsbHandle {
     /// Creates a USB handle from the given device.
-    fn from_device(device: &libusb::Device<'h>) -> Result<UsbHandle<'h>, Error> {
+    fn from_device(device: &rusb::Device<Context>) -> Result<UsbHandle, Error> {
         let mut handle = UsbHandle {
             device_handle: device.open().context("unable to open device")?,
             endpoint_in: 0,
             endpoint_out: 0,
             iface_detached: false,
         };
-        handle.claim(&device)?;
+        handle.claim(device)?;
         Ok(handle)
     }
 
     /// Claim the given device.
-    fn claim(&mut self, device: &libusb::Device<'h>) -> Result<(), Error> {
+    fn claim(&mut self, device: &rusb::Device<Context>) -> Result<(), Error> {
         if let Err(e) = self.device_handle.claim_interface(0) {
             if cfg!(target_os = "linux") {
                 self.device_handle
@@ -767,17 +746,17 @@ impl<'h> UsbHandle<'h> {
                     .claim_interface(0)
                     .context("unable to claim device interface")?;
             } else {
-                bail!(e.context("unable to claim device interface"));
+                bail!("unable to claim device interface {e:?}");
             }
         }
-        self.get_endpoints(&device)
+        self.get_endpoints(device)
             .context("unable to get device endpoints")?;
         Ok(())
     }
 
     /// Updates the endpoints of the USB handle.
-    fn get_endpoints(&mut self, device: &libusb::Device<'h>) -> Result<(), Error> {
-        use libusb::{Direction, TransferType};
+    fn get_endpoints(&mut self, device: &rusb::Device<Context>) -> Result<(), Error> {
+        use rusb::{Direction, TransferType};
 
         let config_descriptor = device
             .active_config_descriptor()
@@ -802,13 +781,13 @@ impl<'h> UsbHandle<'h> {
     /// It will fill `num_size` bytes with the given byte.
     pub fn fel_fill(&self, offset: u32, num_bytes: u32, byte: u8) -> Result<(), Error> {
         assert!(
-            u32::max_value() - num_bytes > offset,
+            u32::MAX - num_bytes > offset,
             "cannot write above {:#010x} - offset: {:#010x}, num_bytes: {:#010x}, bytes above \
              offset: {:#010x}",
-            u32::max_value(),
+            u32::MAX,
             offset,
             num_bytes,
-            u32::max_value() - offset
+            u32::MAX - offset
         );
         let buf = vec![byte; num_bytes as usize];
         self.fel_write(offset, &buf)
@@ -822,13 +801,13 @@ impl<'h> UsbHandle<'h> {
     /// memory address space.
     pub fn fel_read(&self, offset: u32, buf: &mut [u8]) -> Result<(), Error> {
         assert!(
-            u32::max_value() - buf.len() as u32 > offset,
+            u32::MAX - buf.len() as u32 > offset,
             "cannot read above {:#010x} - offset: {:#010x}, buffer length: {:#010x}, bytes above \
              offset: {:#010x}",
-            u32::max_value(),
+            u32::MAX,
             offset,
             buf.len(),
-            u32::max_value() - offset
+            u32::MAX - offset
         );
         self.send_fel_request(AW_FEL_1_READ, offset, buf.len() as u32)
             .context("unable to send AW_FEL_1_READ FEL request")?;
@@ -843,13 +822,13 @@ impl<'h> UsbHandle<'h> {
     /// It **will panic** if the buffer overflows total memory address space.
     pub fn fel_write(&self, offset: u32, buf: &[u8]) -> Result<(), Error> {
         assert!(
-            u32::max_value() - buf.len() as u32 > offset,
+            u32::MAX - buf.len() as u32 > offset,
             "cannot write above {:#010x} - offset: {:#010x}, buffer length: {:#010x}, bytes above \
              offset: {:#010x}",
-            u32::max_value(),
+            u32::MAX,
             offset,
             buf.len(),
-            u32::max_value() - offset
+            u32::MAX - offset
         );
         self.send_fel_request(AW_FEL_1_WRITE, offset, buf.len() as u32)
             .context("unable to send AW_FEL_1_WRITER FEL request")?;
@@ -962,7 +941,11 @@ impl<'h> UsbHandle<'h> {
     /// Sends data to the USB in bulk.
     ///
     /// It will divide the data in chunks.
-    fn usb_bulk_send(device_handle: &DeviceHandle, endpoint: u8, data: &[u8]) -> Result<(), Error> {
+    fn usb_bulk_send(
+        device_handle: &DeviceHandle<Context>,
+        endpoint: u8,
+        data: &[u8],
+    ) -> Result<(), Error> {
         let mut sent = 0;
         while sent < data.len() {
             let slice = if data.len() - sent < AW_USB_MAX_BULK_SEND {
@@ -988,7 +971,7 @@ impl<'h> UsbHandle<'h> {
     ///
     /// It will divide the data in chunks.
     fn usb_bulk_recv(
-        device_handle: &DeviceHandle,
+        device_handle: &DeviceHandle<Context>,
         endpoint: u8,
         data: &mut [u8],
     ) -> Result<(), Error> {
@@ -1012,33 +995,18 @@ impl<'h> UsbHandle<'h> {
     }
 }
 
-impl<'h> Drop for UsbHandle<'h> {
+impl Drop for UsbHandle {
     fn drop(&mut self) {
-        use std::error::Error;
         use std::io::Write;
         if let Err(e) = self.device_handle.release_interface(0) {
             io::stderr()
-                .write_all(
-                    format!(
-                        "error releasing device handle interface: {:?} ({})",
-                        e,
-                        e.description()
-                    )
-                    .as_bytes(),
-                )
+                .write_all(format!("error releasing device handle interface: {e:?}").as_bytes())
                 .unwrap();
         }
         if cfg!(target_os = "linux") && self.iface_detached {
             if let Err(e) = self.device_handle.attach_kernel_driver(0) {
                 io::stderr()
-                    .write_all(
-                        format!(
-                            "error attaching kernel driver: {:?} ({})",
-                            e,
-                            e.description()
-                        )
-                        .as_bytes(),
-                    )
+                    .write_all(format!("error attaching kernel driver: {e:?}").as_bytes())
                     .unwrap();
             }
         }
@@ -1047,7 +1015,7 @@ impl<'h> Drop for UsbHandle<'h> {
 
 /// Allwinner FEL devices context.
 pub struct Fel {
-    context: libusb::Context,
+    context: rusb::Context,
 }
 
 impl fmt::Debug for Fel {
@@ -1060,7 +1028,7 @@ impl Fel {
     /// Creates a new Fel object.
     pub fn initialize() -> Result<Self, Error> {
         Ok(Self {
-            context: libusb::Context::new().context("unable to create libUSB context")?,
+            context: rusb::Context::new().context("unable to create libUSB context")?,
         })
     }
 

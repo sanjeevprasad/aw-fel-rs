@@ -1,8 +1,9 @@
 use std::time::Duration;
 use std::{fmt, thread};
 
+use anyhow::{bail, Context};
+use anyhow::Error;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
-use failure::{bail, Error, ResultExt};
 
 mod fel2spl_thunk;
 use self::fel2spl_thunk::*;
@@ -18,7 +19,7 @@ const UBOOT_IH_ARCH_ARM: u8 = 0x02;
 /// Offset of name field.
 const UBOOT_HEADER_NAME_OFFSET: u32 = 32;
 /// Header of the *U-Boot* header.
-const UBOOT_HEADER_SIZE: u32 = (UBOOT_HEADER_NAME_OFFSET + UBOOT_IH_NMLEN);
+const UBOOT_HEADER_SIZE: u32 = UBOOT_HEADER_NAME_OFFSET + UBOOT_IH_NMLEN;
 
 /// *U-boot* image type.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -49,7 +50,7 @@ impl fmt::Display for UbootImageType {
     }
 }
 
-impl<'h> FelHandle<'h> {
+impl FelHandle {
     /// This function tests a given buffer for a valid *U-Boot* image. Upon success, the image data
     /// gets transferred to the default memory address stored within the image header; and the
     /// function returns the *U-Boot* entry point (offset) and size values, in that order.

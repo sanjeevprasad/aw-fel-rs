@@ -615,7 +615,7 @@ mod tests {
         );
     }
 
-    #[allow(clippy::cyclomatic_complexity)]
+    #[allow(clippy::cognitive_complexity)]
     #[test]
     fn it_soc_info() {
         for soc_info in &SOC_INFO_TABLE {
